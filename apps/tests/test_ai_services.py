@@ -3,8 +3,15 @@ import uuid
 
 import pytest
 
-from apps.schemas.ai_schemas import AIProjectPlanRequest, DepartmentRef, TaskTypeRef
-from apps.services.ai_services import PlanValidationError, generate_project_plan
+from apps.schemas.ai_schemas import (
+    AIProjectPlanRegenerateRequest,
+    AIProjectPlanRequest,
+    DepartmentRef,
+    GeneratedTask,
+    RegenerateTaskRequest,
+    TaskTypeRef,
+)
+from apps.services.ai_services import PlanValidationError, generate_project_plan, regenerate_project_plan_tasks
 from apps.services.providers.base import AIProvider
 
 
@@ -86,3 +93,74 @@ async def test_markdown_fenced_json_is_still_parsed():
 def test_task_type_ref_roundtrip():
     ref = TaskTypeRef(id=uuid.uuid4(), name='Development')
     assert ref.name == 'Development'
+
+
+def make_regenerate_request(existing_tasks=None, tasks_to_regenerate=None, departments=None, task_types=None):
+    return AIProjectPlanRegenerateRequest(
+        generation_id=uuid.uuid4(), project_id=uuid.uuid4(), title='Build a support platform',
+        description='A SaaS customer support platform.',
+        departments=departments or [], task_types=task_types or [],
+        existing_tasks=existing_tasks or [],
+        tasks_to_regenerate=tasks_to_regenerate or [
+            RegenerateTaskRequest(temporary_id='task-2', title='Design DB', reviewer_comment='Add more detail.'),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_regeneration_returns_only_the_requested_tasks():
+    raw = json.dumps({'tasks': [{'temporary_id': 'task-2', 'title': 'Design DB schema', 'description': 'Detailed now.'}]})
+    result = await regenerate_project_plan_tasks(make_regenerate_request(), provider=StubProvider(raw))
+    assert len(result.tasks) == 1
+    assert result.tasks[0].temporary_id == 'task-2'
+    assert result.tasks[0].description == 'Detailed now.'
+
+
+@pytest.mark.asyncio
+async def test_regeneration_rejects_a_missing_requested_task():
+    raw = json.dumps({'tasks': []})
+    with pytest.raises(PlanValidationError):
+        await regenerate_project_plan_tasks(make_regenerate_request(), provider=StubProvider(raw))
+
+
+@pytest.mark.asyncio
+async def test_regeneration_rejects_an_extra_unrequested_task():
+    raw = json.dumps({'tasks': [
+        {'temporary_id': 'task-2', 'title': 'Design DB'},
+        {'temporary_id': 'task-99', 'title': 'A task nobody asked to regenerate'},
+    ]})
+    with pytest.raises(PlanValidationError):
+        await regenerate_project_plan_tasks(make_regenerate_request(), provider=StubProvider(raw))
+
+
+@pytest.mark.asyncio
+async def test_regeneration_rejects_invented_department_id():
+    real_department_id = uuid.uuid4()
+    invented_id = str(uuid.uuid4())
+    raw = json.dumps({'tasks': [{'temporary_id': 'task-2', 'title': 'Design DB', 'suggested_department_id': invented_id}]})
+    request = make_regenerate_request(departments=[DepartmentRef(id=real_department_id, name='Engineering')])
+    with pytest.raises(PlanValidationError):
+        await regenerate_project_plan_tasks(request, provider=StubProvider(raw))
+
+
+@pytest.mark.asyncio
+async def test_regeneration_response_has_no_structural_fields_even_if_provider_sends_them():
+    # A provider that ignores instructions and sends sequence/dependency_ids
+    # anyway must not be able to smuggle a structural change through --
+    # the response schema has no such fields, so they're simply dropped.
+    raw = json.dumps({'tasks': [{
+        'temporary_id': 'task-2', 'title': 'Design DB', 'sequence': 99, 'dependency_ids': ['task-1'],
+    }]})
+    result = await regenerate_project_plan_tasks(make_regenerate_request(), provider=StubProvider(raw))
+    assert not hasattr(result.tasks[0], 'sequence')
+    assert not hasattr(result.tasks[0], 'dependency_ids')
+
+
+@pytest.mark.asyncio
+async def test_regeneration_uses_existing_tasks_as_context_only():
+    existing = [GeneratedTask(temporary_id='task-1', sequence=1, title='Define requirements')]
+    raw = json.dumps({'tasks': [{'temporary_id': 'task-2', 'title': 'Design DB'}]})
+    result = await regenerate_project_plan_tasks(
+        make_regenerate_request(existing_tasks=existing), provider=StubProvider(raw),
+    )
+    assert len(result.tasks) == 1

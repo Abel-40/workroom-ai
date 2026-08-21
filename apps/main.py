@@ -4,10 +4,14 @@ import time
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from apps.core.config import settings
-from apps.schemas.ai_schemas import AIProjectPlanRequest
+from apps.schemas.ai_schemas import AIProjectPlanRegenerateRequest, AIProjectPlanRequest
 from apps.schemas.assistant_schemas import AIAssistantRequest
 from apps.schemas.health_schemas import AIProjectHealthRequest
-from apps.services.ai_services import PlanValidationError, generate_project_plan
+from apps.services.ai_services import (
+    PlanValidationError,
+    generate_project_plan,
+    regenerate_project_plan_tasks,
+)
 from apps.services.assistant_services import AssistantAnswerError, generate_assistant_answer
 from apps.services.health_services import HealthValidationError, generate_health_summary
 from apps.services.providers import PermanentProviderError, TransientProviderError, get_provider
@@ -71,6 +75,45 @@ async def create_project_plan(request: AIProjectPlanRequest):
     return success_response(200, 'Project plan generated successfully.', data={
         'provider': provider.name, 'model': getattr(provider, 'model', ''),
         **plan.model_dump(mode='json'),
+    })
+
+
+@app.post('/api/v1/project-plan-regenerate', dependencies=[Depends(verify_service_token)])
+async def create_project_plan_regeneration(request: AIProjectPlanRegenerateRequest):
+    started = time.monotonic()
+    log_context = {'generation_id': str(request.generation_id), 'project_id': str(request.project_id)}
+
+    try:
+        provider = get_provider()
+    except PermanentProviderError as exc:
+        logger.error('ai_plan_regenerate.provider_unavailable', extra=log_context)
+        return error_response(502, 'AI provider is not configured.', error={'type': 'permanent', 'detail': str(exc)})
+
+    try:
+        result = await regenerate_project_plan_tasks(request, provider=provider)
+    except TransientProviderError as exc:
+        logger.warning('ai_plan_regenerate.transient_failure', extra=log_context)
+        return error_response(
+            503, 'AI provider temporarily unavailable.', error={'type': 'transient', 'detail': str(exc)},
+        )
+    except PermanentProviderError as exc:
+        logger.error('ai_plan_regenerate.permanent_failure', extra=log_context)
+        return error_response(
+            502, 'AI provider request failed.', error={'type': 'permanent', 'detail': str(exc)},
+        )
+    except PlanValidationError as exc:
+        logger.error('ai_plan_regenerate.invalid_output', extra=log_context)
+        return error_response(
+            422, 'AI provider output failed validation.', error={'type': 'invalid_output', 'detail': str(exc)},
+        )
+
+    duration = time.monotonic() - started
+    logger.info('ai_plan_regenerate.completed', extra={
+        **log_context, 'duration_seconds': round(duration, 2), 'task_count': len(result.tasks),
+    })
+    return success_response(200, 'Plan tasks regenerated successfully.', data={
+        'provider': provider.name, 'model': getattr(provider, 'model', ''),
+        **result.model_dump(mode='json'),
     })
 
 
