@@ -1,11 +1,8 @@
 {
-	"folders": [
-		{
-			"path": ".."
-		},
-		{
-			"path": "../../workroom-fd"
-		}
-	],
-	"settings": {}
+  "folders": [
+    {
+      "path": "..",
+    },
+  ],
+  "settings": {},
 }
