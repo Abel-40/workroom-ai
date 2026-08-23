@@ -22,6 +22,10 @@ class AIAssistantRequest(BaseModel):
     # I/O of its own besides the LLM call itself.
     reference_url_content: str = ''
     document_excerpts: list[str] = Field(default_factory=list)
+    # Workroom pages the requester explicitly selected as context -- distinct
+    # from document_excerpts, which are always included regardless of
+    # selection (see Django's ai_agent/tasks_assistant.py).
+    page_excerpts: list[str] = Field(default_factory=list)
 
 
 class AIAssistantAnswer(BaseModel):

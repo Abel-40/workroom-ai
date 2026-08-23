@@ -27,7 +27,9 @@ You generate a structured execution plan for a project. Rules:
 - Output MUST be a single JSON object matching the supplied response_schema exactly. No prose, no markdown fences, no commentary outside the JSON.
 - Break the project into actionable, concrete tasks ordered by logical sequence (field `sequence`, starting at 1).
 - `dependency_ids` may only reference `temporary_id` values you generated in this same plan. Never invent ids.
-- `suggested_department_id` and `suggested_task_type_id`, when set, MUST be chosen only from the department/task-type ids supplied to you. Never invent a department, task type, user, or assignee that wasn't supplied.
+- `suggested_department_id`, `suggested_task_type_id`, and `suggested_assignee_id`, when set, MUST be chosen only from the ids supplied to you. Never invent a department, task type, user, or assignee that wasn't supplied.
+- If `available_assignees` is non-empty, suggest the person who best fits each task where a natural fit exists; leave `suggested_assignee_id` null otherwise. If `available_assignees` is empty, always leave it null.
+- Never generate more than `max_tasks` tasks in total, when `max_tasks` is provided.
 - Do not perform any action; you are only producing a plan for a human to review.
 - Keep `estimated_effort` short if you provide it (e.g. "2h", "1d")."""
 
@@ -43,6 +45,8 @@ def _build_user_prompt(request: AIProjectPlanRequest) -> str:
         'project_requirements': request.requirements,
         'available_departments': [{'id': str(d.id), 'name': d.name} for d in request.departments],
         'available_task_types': [{'id': str(t.id), 'name': t.name} for t in request.task_types],
+        'available_assignees': [{'id': str(a.id), 'name': a.name} for a in request.assignees],
+        'max_tasks': request.max_tasks,
         'response_schema': {
             'summary': 'string',
             'tasks': [{
@@ -55,6 +59,7 @@ def _build_user_prompt(request: AIProjectPlanRequest) -> str:
                 'dependency_ids': 'list of temporary_id strings this task depends on',
                 'suggested_department_id': 'one of available_departments[].id, or null',
                 'suggested_task_type_id': 'one of available_task_types[].id, or null',
+                'suggested_assignee_id': 'one of available_assignees[].id, or null',
             }],
         },
     }
@@ -84,6 +89,7 @@ def parse_and_validate(raw_text: str, request: AIProjectPlanRequest) -> AIProjec
     known_ids = {task.temporary_id for task in plan.tasks}
     known_department_ids = {d.id for d in request.departments}
     known_task_type_ids = {t.id for t in request.task_types}
+    known_assignee_ids = {a.id for a in request.assignees}
 
     for task in plan.tasks:
         unknown_deps = [dep for dep in task.dependency_ids if dep not in known_ids]
@@ -93,6 +99,15 @@ def parse_and_validate(raw_text: str, request: AIProjectPlanRequest) -> AIProjec
             raise PlanValidationError(f"Task '{task.temporary_id}' suggested a department id that wasn't supplied.")
         if task.suggested_task_type_id and task.suggested_task_type_id not in known_task_type_ids:
             raise PlanValidationError(f"Task '{task.temporary_id}' suggested a task type id that wasn't supplied.")
+        # Auxiliary, unlike department/task-type above: Django treats an
+        # out-of-pool assignee suggestion as droppable, not fatal (it's just
+        # a hint the human still confirms), so this layer drops it rather
+        # than failing the whole plan too.
+        if task.suggested_assignee_id and task.suggested_assignee_id not in known_assignee_ids:
+            task.suggested_assignee_id = None
+
+    if request.max_tasks:
+        plan.tasks = plan.tasks[:request.max_tasks]
 
     return plan
 

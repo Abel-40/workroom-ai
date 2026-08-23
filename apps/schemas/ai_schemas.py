@@ -23,6 +23,11 @@ class TaskTypeRef(BaseModel):
     name: str
 
 
+class AssigneeRef(BaseModel):
+    id: UUID
+    name: str
+
+
 class AIProjectPlanRequest(BaseModel):
     generation_id: UUID
     project_id: UUID
@@ -31,6 +36,11 @@ class AIProjectPlanRequest(BaseModel):
     requirements: str = ''
     departments: list[DepartmentRef] = Field(default_factory=list)
     task_types: list[TaskTypeRef] = Field(default_factory=list)
+    # Human-approved pool the model may suggest per task (never invent a
+    # user outside this list -- AI_SERVICE_SPEC.md #3). max_tasks is a hard
+    # cap Django re-enforces independently either way (Rule 10).
+    assignees: list[AssigneeRef] = Field(default_factory=list)
+    max_tasks: int | None = None
 
 
 class GeneratedTask(BaseModel):
@@ -43,6 +53,7 @@ class GeneratedTask(BaseModel):
     dependency_ids: list[str] = Field(default_factory=list)
     suggested_department_id: UUID | None = None
     suggested_task_type_id: UUID | None = None
+    suggested_assignee_id: UUID | None = None
 
     @field_validator('priority', mode='before')
     @classmethod

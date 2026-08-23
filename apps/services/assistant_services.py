@@ -47,6 +47,11 @@ def _build_user_prompt(request: AIAssistantRequest) -> str:
         for index, excerpt in enumerate(request.document_excerpts, start=1):
             lines.append(f'--- Document {index} ---')
             lines.append(excerpt)
+    if request.page_excerpts:
+        lines.append('Excerpts from Workroom pages the user selected as context:')
+        for index, excerpt in enumerate(request.page_excerpts, start=1):
+            lines.append(f'--- Page {index} ---')
+            lines.append(excerpt)
     lines.append(f'Question: {request.question}')
     return '\n'.join(lines)
 
