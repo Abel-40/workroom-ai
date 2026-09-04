@@ -7,6 +7,7 @@ from apps.core.config import settings
 from apps.schemas.ai_schemas import AIProjectPlanRegenerateRequest, AIProjectPlanRequest
 from apps.schemas.assistant_schemas import AIAssistantRequest
 from apps.schemas.health_schemas import AIProjectHealthRequest
+from apps.schemas.todo_schemas import AITodoRequest
 from apps.services.ai_services import (
     PlanValidationError,
     generate_project_plan,
@@ -14,6 +15,7 @@ from apps.services.ai_services import (
 )
 from apps.services.assistant_services import AssistantAnswerError, generate_assistant_answer
 from apps.services.health_services import HealthValidationError, generate_health_summary
+from apps.services.todo_services import TodoValidationError, generate_task_todos
 from apps.services.providers import PermanentProviderError, TransientProviderError, get_provider
 from apps.services.providers.groq import get_groq_assistant_provider
 from apps.utils.response import error_response, success_response
@@ -183,4 +185,47 @@ async def create_health_summary(request: AIProjectHealthRequest):
     return success_response(200, 'Project health summary generated successfully.', data={
         'provider': provider.name, 'model': getattr(provider, 'model', ''),
         **result.model_dump(mode='json'),
+    })
+
+
+@app.post('/api/v1/task-todos', dependencies=[Depends(verify_service_token)])
+async def create_task_todos(request: AITodoRequest):
+    """Turns one person's assigned tasks into their own private checklist.
+
+    Django has already confirmed every task in the request is assigned to the
+    requester, and re-validates the result again before persisting -- this
+    service never learns who the requester is beyond that.
+    """
+    started = time.monotonic()
+    log_context = {'generation_id': str(request.generation_id), 'task_count': len(request.tasks)}
+
+    try:
+        provider = get_provider()
+    except PermanentProviderError as exc:
+        logger.error('ai_todos.provider_unavailable', extra=log_context)
+        return error_response(502, 'AI provider is not configured.', error={'type': 'permanent', 'detail': str(exc)})
+
+    try:
+        plan = await generate_task_todos(request, provider=provider)
+    except TransientProviderError as exc:
+        logger.warning('ai_todos.transient_failure', extra=log_context)
+        return error_response(
+            503, 'AI provider temporarily unavailable.', error={'type': 'transient', 'detail': str(exc)},
+        )
+    except PermanentProviderError as exc:
+        logger.error('ai_todos.permanent_failure', extra=log_context)
+        return error_response(502, 'AI provider request failed.', error={'type': 'permanent', 'detail': str(exc)})
+    except TodoValidationError as exc:
+        logger.error('ai_todos.invalid_output', extra=log_context)
+        return error_response(
+            422, 'AI provider output failed validation.', error={'type': 'invalid_output', 'detail': str(exc)},
+        )
+
+    duration = time.monotonic() - started
+    logger.info('ai_todos.completed', extra={
+        **log_context, 'duration_seconds': round(duration, 2), 'todo_count': len(plan.todos),
+    })
+    return success_response(200, 'Todos generated successfully.', data={
+        'provider': provider.name, 'model': getattr(provider, 'model', ''),
+        **plan.model_dump(mode='json'),
     })
